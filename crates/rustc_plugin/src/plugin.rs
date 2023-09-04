@@ -1,4 +1,4 @@
-use std::{borrow::Cow, path::PathBuf, process::Command};
+use std::{borrow::Cow, ffi::OsString, path::PathBuf, process::Command};
 
 use cargo_metadata::camino::Utf8Path;
 use serde::{de::DeserializeOwned, Serialize};
@@ -22,6 +22,8 @@ pub struct RustcPluginArgs<Args> {
 
   /// Which crates you want to run the plugin on.
   pub filter: CrateFilter,
+
+  pub env: Vec<(OsString, OsString)>,
 }
 
 /// Interface between your plugin and the rustc_plugin framework.

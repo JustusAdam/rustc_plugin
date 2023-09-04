@@ -29,10 +29,11 @@ pub fn cli_main<T: RustcPlugin>(plugin: T) {
   let plugin_subdir = format!("plugin-{}", env!("RUSTC_CHANNEL"));
   let target_dir = metadata.target_directory.join(plugin_subdir);
 
-  let args = plugin.args(&target_dir);
+  let mut args = plugin.args(&target_dir);
 
   let mut cmd = Command::new("cargo");
   cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+  cmd.envs(args.env.drain(..));
 
   let mut path = env::current_exe()
     .expect("current executable path invalid")
