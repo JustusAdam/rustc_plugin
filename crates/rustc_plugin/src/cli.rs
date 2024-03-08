@@ -65,7 +65,14 @@ pub fn cli_main<T: RustcPlugin>(plugin: T) {
   let prior_rustflags = prior_rustflags().unwrap();
 
   cmd
-    .env("RUSTC_WORKSPACE_WRAPPER", path)
+    .env(
+      if matches!(args.filter, CrateFilter::AllCrates) {
+        "RUSTC_WRAPPER"
+      } else {
+        "RUSTC_WORKSPACE_WRAPPER"
+      },
+      path,
+    )
     .args(["check", "--target-dir"])
     .env(CARGO_ENCODED_RUSTFLAGS, prior_rustflags.join("\x1f"))
     .arg(&target_dir);
