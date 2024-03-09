@@ -299,8 +299,8 @@ impl<'tcx> PlaceExt<'tcx> for Place<'tcx> {
       usize,
       (PlaceRef<'tcx>, PlaceElem<'tcx>),
     )|
-     -> (ElemPosition, Cow<'static, str>) {
-      match elem {
+     -> Option<(ElemPosition, Cow<'static, str>)> {
+      Some(match elem {
         ProjectionElem::Deref => (ElemPosition::Prefix, "*".into()),
 
         ProjectionElem::Field(field, _) => {
@@ -318,7 +318,10 @@ impl<'tcx> PlaceExt<'tcx> for Place<'tcx> {
                   };
                   &def.variant(*variant_idx).fields
                 }
-                kind => unimplemented!("{kind:?}"),
+                kind => {
+                  log::debug!("place::to_string unimplemented for {kind:?}");
+                  return None;
+                }
               };
 
               fields[field].ident(tcx).to_string()
@@ -334,7 +337,10 @@ impl<'tcx> PlaceExt<'tcx> for Place<'tcx> {
               None => field.as_usize().to_string(),
             },
 
-            kind => unimplemented!("{kind:?}"),
+            kind => {
+              log::debug!("place::to_string unimplemented for {kind:?}");
+              return None;
+            }
           };
 
           (ElemPosition::Suffix, format!(".{field_name}").into())
@@ -345,15 +351,19 @@ impl<'tcx> PlaceExt<'tcx> for Place<'tcx> {
         }
 
         ProjectionElem::Index(_) => (ElemPosition::Suffix, "[_]".into()),
-        kind => unimplemented!("{kind:?}"),
-      }
+        kind => {
+          log::debug!("place::to_string unimplemented for {kind:?}");
+          return None;
+        }
+      })
     };
 
-    let (positions, contents): (Vec<_>, Vec<_>) = self
+    let tuples = self
       .iter_projections()
       .enumerate()
       .map(elem_to_string)
-      .unzip();
+      .collect::<Option<Vec<_>>>()?;
+    let (positions, contents): (Vec<_>, Vec<_>) = tuples.into_iter().unzip();
 
     // Combine the prefixes and suffixes into a corresponding sequence
     let mut parts = VecDeque::from([local_name]);
