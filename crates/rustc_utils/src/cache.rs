@@ -109,6 +109,10 @@ where
     // equal to Cache, so Cache cannot be dropped before this reference goes out of scope.
     Some(unsafe { std::mem::transmute::<&'_ Out, &'a Out>(&**entry) })
   }
+
+  pub fn is_in_cache(&self, key: &In) -> bool {
+    self.0.borrow().contains_key(key)
+  }
 }
 
 fn recursion_panic<A>() -> A {
