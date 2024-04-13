@@ -84,6 +84,11 @@ where
       .get_maybe_recursive(key, compute)
       .unwrap_or_else(recursion_panic)
   }
+
+  #[doc(hidden)]
+  pub fn borrow(&self) -> std::cell::Ref<'_, HashMap<In, Option<Pin<Box<Out>>>>> {
+    self.0.borrow()
+  }
   /// Returns the cached value for the given key, or runs `compute` if
   /// the value is not in cache.
   ///
