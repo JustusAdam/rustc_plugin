@@ -535,7 +535,6 @@ impl<'tcx, Dispatcher: RegionVisitorDispatcher<'tcx>> TypeVisitor<TyCtxt<'tcx>>
 
     match ty.kind() {
       _ if ty.is_box() => {
-        self.visit_region(Region::new_var(tcx, UNKNOWN_REGION));
         self.place_stack.push(ProjectionElem::Deref);
         self.visit_ty(ty.boxed_ty());
         self.place_stack.pop();
