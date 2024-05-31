@@ -95,10 +95,12 @@ pub trait PlaceExt<'tcx> {
   /// Returns true if `self` is a projection of an argument local.
   fn is_arg(&self, body: &Body<'tcx>) -> bool;
 
-  /// Returns true if `self` could not be resolved further to another place.
+  /// Returns true if `self` cannot be resolved further to another place.
   ///
-  /// This is true of places with no dereferences in the projection, or of dereferences
-  /// of arguments.
+  /// This is true if one of the following is true:
+  /// - `self` contains no dereference (`*`) projections
+  /// - `self` is the dereference of (a projection of) an argument to `body`
+  /// - all dereferences in `self` are dereferences of a `Box`
   fn is_direct(&self, body: &Body<'tcx>) -> bool;
 
   type RefsInProjectionIter<'a>: Iterator<
@@ -128,7 +130,7 @@ pub trait PlaceExt<'tcx> {
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
     def_id: DefId,
-  ) -> Vec<Place<'tcx>>;
+  ) -> HashSet<Place<'tcx>>;
 
   /// Returns all possible projections of `self`.
   fn interior_paths(
@@ -136,7 +138,7 @@ pub trait PlaceExt<'tcx> {
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
     def_id: DefId,
-  ) -> Vec<Place<'tcx>>;
+  ) -> HashSet<Place<'tcx>>;
 
   /// Returns a pretty representation of a place that uses debug info when available.
   fn to_string(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> Option<String>;
@@ -176,7 +178,17 @@ impl<'tcx> PlaceExt<'tcx> for Place<'tcx> {
   }
 
   fn is_direct(&self, body: &Body<'tcx>) -> bool {
-    !self.is_indirect() || self.is_arg(body)
+    !self.is_indirect() || self.is_arg(body) || {
+      rustc_middle::ty::tls::with(|tcx: TyCtxt| {
+        let tcx: TyCtxt<'tcx> = unsafe { std::mem::transmute(tcx) };
+        !self.iter_projections().any(|(pref, p)| {
+          matches!(p, ProjectionElem::Deref if {
+            let t = pref.ty(body, tcx).ty;
+            !t.is_box()
+          })
+        })
+      })
+    }
   }
 
   type RefsInProjectionIter<'a> = impl Iterator<Item = (PlaceRef<'tcx>, &'tcx [PlaceElem<'tcx>])> + 'a where Self: 'a;
@@ -205,25 +217,20 @@ impl<'tcx> PlaceExt<'tcx> for Place<'tcx> {
     def_id: DefId,
   ) -> HashMap<RegionVid, Vec<(Place<'tcx>, Mutability)>> {
     let ty = self.ty(body.local_decls(), tcx).ty;
-    let mut region_collector = CollectRegions {
+    let mut region_collector = RegionVisitor::<RegionMemberCollector>::new(
       tcx,
       def_id,
-      local: self.local,
-      place_stack: self.projection.to_vec(),
-      ty_stack: Vec::new(),
-      regions: HashMap::default(),
-      places: None,
-      types: None,
-      stop_at: if
+      *self,
+      if
       /*shallow*/
       false {
         StoppingCondition::AfterRefs
       } else {
         StoppingCondition::None
       },
-    };
+    );
     region_collector.visit_ty(ty);
-    region_collector.regions
+    region_collector.into_inner().0
   }
 
   fn interior_places(
@@ -231,21 +238,16 @@ impl<'tcx> PlaceExt<'tcx> for Place<'tcx> {
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
     def_id: DefId,
-  ) -> Vec<Place<'tcx>> {
+  ) -> HashSet<Place<'tcx>> {
     let ty = self.ty(body.local_decls(), tcx).ty;
-    let mut region_collector = CollectRegions {
+    let mut region_collector = RegionVisitor::<VisitedPlacesCollector>::new(
       tcx,
       def_id,
-      local: self.local,
-      place_stack: self.projection.to_vec(),
-      ty_stack: Vec::new(),
-      regions: HashMap::default(),
-      places: Some(HashSet::default()),
-      types: None,
-      stop_at: StoppingCondition::BeforeRefs,
-    };
+      *self,
+      StoppingCondition::BeforeRefs,
+    );
     region_collector.visit_ty(ty);
-    region_collector.places.unwrap().into_iter().collect()
+    region_collector.into_inner().0
   }
 
   fn interior_paths(
@@ -253,21 +255,16 @@ impl<'tcx> PlaceExt<'tcx> for Place<'tcx> {
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
     def_id: DefId,
-  ) -> Vec<Place<'tcx>> {
+  ) -> HashSet<Place<'tcx>> {
     let ty = self.ty(body.local_decls(), tcx).ty;
-    let mut region_collector = CollectRegions {
+    let mut region_collector = RegionVisitor::<VisitedPlacesCollector>::new(
       tcx,
       def_id,
-      local: self.local,
-      place_stack: self.projection.to_vec(),
-      ty_stack: Vec::new(),
-      regions: HashMap::default(),
-      places: Some(HashSet::default()),
-      types: None,
-      stop_at: StoppingCondition::None,
-    };
+      *self,
+      StoppingCondition::None,
+    );
     region_collector.visit_ty(ty);
-    region_collector.places.unwrap().into_iter().collect()
+    region_collector.into_inner().0
   }
 
   fn to_string(&self, tcx: TyCtxt<'tcx>, body: &Body<'tcx>) -> Option<String> {
@@ -434,22 +431,95 @@ enum StoppingCondition {
   AfterRefs,
 }
 
-struct CollectRegions<'tcx> {
+trait RegionVisitorDispatcher<'tcx> {
+  fn on_visit_place(&mut self, _: Place<'tcx>) {}
+  fn on_visit_type(&mut self, _: Ty<'tcx>) {}
+  fn on_visit_region_member(&mut self, _: RegionVid, _: Place<'tcx>, _: Mutability) {}
+}
+
+#[derive(Default)]
+struct VisitedPlacesCollector<'tcx>(HashSet<Place<'tcx>>);
+
+impl<'tcx> RegionVisitorDispatcher<'tcx> for VisitedPlacesCollector<'tcx> {
+  fn on_visit_place(&mut self, place: Place<'tcx>) {
+    self.0.insert(place);
+  }
+}
+
+#[derive(Default)]
+struct VisitedTypesCollector<'tcx>(HashSet<Ty<'tcx>>);
+
+impl<'tcx> RegionVisitorDispatcher<'tcx> for VisitedTypesCollector<'tcx> {
+  fn on_visit_type(&mut self, ty: Ty<'tcx>) {
+    self.0.insert(ty);
+  }
+}
+
+#[derive(Default)]
+struct RegionMemberCollector<'tcx>(HashMap<RegionVid, Vec<(Place<'tcx>, Mutability)>>);
+
+impl<'tcx> RegionVisitorDispatcher<'tcx> for RegionMemberCollector<'tcx> {
+  fn on_visit_region_member(
+    &mut self,
+    key: RegionVid,
+    place: Place<'tcx>,
+    mutbl: Mutability,
+  ) {
+    self.0.entry(key).or_default().push((place, mutbl));
+  }
+}
+
+struct RegionVisitor<'tcx, Dispatcher> {
   tcx: TyCtxt<'tcx>,
   def_id: DefId,
+  /// Base local of the place we are collecting regions for.
   local: Local,
+  /// List of projections to apply to the base local in order to reach the
+  /// child place currently under consideration.
+  ///
+  /// Starts out as the projections in the input place.
   place_stack: Vec<PlaceElem<'tcx>>,
+  /// Sequence of parent types to reach the place currently under consideration.
+  /// Correspond to the projections in `place_stack`.
   ty_stack: Vec<Ty<'tcx>>,
-  places: Option<HashSet<Place<'tcx>>>,
-  types: Option<HashSet<Ty<'tcx>>>,
-  regions: HashMap<RegionVid, Vec<(Place<'tcx>, Mutability)>>,
+  /// Callbacks
+  dispatcher: Dispatcher,
   stop_at: StoppingCondition,
+}
+
+impl<'tcx, Dispatcher: Default> RegionVisitor<'tcx, Dispatcher> {
+  /// Construct a new [`CollectRegions`] visitor.
+  ///
+  /// By itself the visitor only implements the traversal. Actual accumulation
+  /// of useful information is done by the `Dispatcher`.
+  fn new(
+    tcx: TyCtxt<'tcx>,
+    def_id: DefId,
+    place: Place<'tcx>,
+    stop_at: StoppingCondition,
+  ) -> Self {
+    Self {
+      tcx,
+      def_id,
+      local: place.local,
+      place_stack: place.projection.to_vec(),
+      ty_stack: Vec::new(),
+      dispatcher: Default::default(),
+      stop_at,
+    }
+  }
+
+  fn into_inner(self) -> Dispatcher {
+    self.dispatcher
+  }
 }
 
 /// Used to describe aliases of owned and raw pointers.
 pub const UNKNOWN_REGION: RegionVid = RegionVid::MAX;
 
-impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for CollectRegions<'tcx> {
+impl<'tcx, Dispatcher: RegionVisitorDispatcher<'tcx>> TypeVisitor<TyCtxt<'tcx>>
+  for RegionVisitor<'tcx, Dispatcher>
+{
   fn visit_ty(&mut self, ty: Ty<'tcx>) -> ControlFlow<Self::BreakTy> {
     let tcx = self.tcx;
     if self.ty_stack.iter().any(|visited_ty| ty == *visited_ty) {
@@ -588,13 +658,11 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for CollectRegions<'tcx> {
     // //   f.
     // // }
 
-    if let Some(places) = self.places.as_mut() {
-      places.insert(Place::make(self.local, &self.place_stack, tcx));
-    }
+    self
+      .dispatcher
+      .on_visit_place(Place::make(self.local, &self.place_stack, tcx));
 
-    if let Some(types) = self.types.as_mut() {
-      types.insert(ty);
-    }
+    self.dispatcher.on_visit_type(ty);
 
     self.ty_stack.pop();
     ControlFlow::Continue(())
@@ -624,15 +692,16 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for CollectRegions<'tcx> {
     let place = Place::make(self.local, &self.place_stack, self.tcx);
 
     self
-      .regions
-      .entry(region)
-      .or_default()
-      .push((place, mutability));
+      .dispatcher
+      .on_visit_region_member(region, place, mutability);
 
     // for initialization setup of Aliases::build
-    if let Some(places) = self.places.as_mut() {
-      places.insert(self.tcx.mk_place_deref(place));
-    }
+    //
+    // uses `once_with` so that the place is only created when the iterator is
+    // not ignored (e.g. `Places != Ignore`)
+    self
+      .dispatcher
+      .on_visit_place(self.tcx.mk_place_deref(place));
 
     ControlFlow::Continue(())
   }
