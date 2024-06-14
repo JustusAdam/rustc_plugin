@@ -87,7 +87,7 @@ impl CompileBuilder {
     self
   }
 
-  pub fn compile<R>(&self, f: impl for<'tcx> FnOnce(CompileResult<'tcx>) + Send) {
+  pub fn compile(&self, f: impl for<'tcx> FnOnce(CompileResult<'tcx>) + Send) {
     let mut callbacks = TestCallbacks {
       callback: Some(move |tcx: TyCtxt<'_>| f(CompileResult { tcx })),
     };
