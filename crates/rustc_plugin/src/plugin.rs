@@ -2,6 +2,7 @@ use std::{borrow::Cow, path::PathBuf, process::Command};
 
 use cargo_metadata::camino::Utf8Path;
 use serde::{de::DeserializeOwned, Serialize};
+use rustc_tools_util::VersionInfo;
 
 /// Specification of a set of crates.
 pub enum CrateFilter {
@@ -37,6 +38,10 @@ pub trait RustcPlugin: Sized {
   /// env!("CARGO_PKG_VERSION").into()
   /// ```
   fn version(&self) -> Cow<'static, str>;
+
+  fn reported_driver_version(&self) -> Cow<'static, str> {
+    Cow::Owned(format!("{}", rustc_tools_util::get_version_info!()))
+  }
 
   /// Returns the name of your driver binary as it's installed in the filesystem.
   ///

@@ -6,7 +6,6 @@ use std::{
 };
 
 use rustc_session::{config::ErrorOutputType, EarlyErrorHandler};
-use rustc_tools_util::VersionInfo;
 
 use super::plugin::{RustcPlugin, PLUGIN_ARGS};
 use crate::cli::{RUN_ON_ALL_CRATES, SPECIFIC_CRATE, SPECIFIC_TARGET};
@@ -109,8 +108,7 @@ pub fn driver_main<T: RustcPlugin>(plugin: T) {
     let (have_sys_root_arg, sys_root) = get_sysroot(&orig_args);
 
     if orig_args.iter().any(|a| a == "--version" || a == "-V") {
-      let version_info = rustc_tools_util::get_version_info!();
-      println!("{version_info}");
+      println!("{}", plugin.reported_driver_version());
       exit(0);
     }
 
