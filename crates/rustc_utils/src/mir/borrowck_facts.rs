@@ -73,8 +73,22 @@ pub fn override_queries(
   local.mir_borrowck = mir_borrowck;
 }
 
+#[cfg(test)]
+type CacheKey = (LocalDefId, usize);
+
+#[cfg(not(test))]
+type CacheKey = LocalDefId;
+
 thread_local! {
-  static MIR_BODIES: Cache<LocalDefId, BodyWithBorrowckFacts<'static>> = Cache::default();
+  static MIR_BODIES: Cache<CacheKey, BodyWithBorrowckFacts<'static>> = Cache::default();
+}
+
+fn make_key(_tcx: TyCtxt<'_>, def_id: LocalDefId) -> CacheKey {
+  #[cfg(test)]
+  let key = (def_id, std::ptr::addr_of!(*_tcx) as usize);
+  #[cfg(not(test))]
+  let key = def_id;
+  key
 }
 
 fn mir_borrowck(tcx: TyCtxt<'_>, def_id: LocalDefId) -> &BorrowCheckResult<'_> {
@@ -97,7 +111,7 @@ fn mir_borrowck(tcx: TyCtxt<'_>, def_id: LocalDefId) -> &BorrowCheckResult<'_> {
   let body_with_facts: BodyWithBorrowckFacts<'static> =
     unsafe { std::mem::transmute(body_with_facts) };
   MIR_BODIES.with(|cache| {
-    cache.get(def_id, |_| body_with_facts);
+    cache.get(make_key(tcx, def_id), |_| body_with_facts);
   });
 
   let mut providers = Providers::default();
@@ -124,7 +138,7 @@ pub fn get_body_with_borrowck_facts<'tcx>(
 ) -> &'tcx BodyWithBorrowckFacts<'tcx> {
   let _ = tcx.mir_borrowck(def_id);
   MIR_BODIES.with(|cache| {
-    let body = cache.get(def_id, |_| panic!("mir_borrowck override should have stored body for item: {def_id:?}. Are you sure you registered borrowck_facts::override_queries?"));
+    let body = cache.get(make_key(tcx, def_id), |_| panic!("mir_borrowck override should have stored body for item: {def_id:?}. Are you sure you registered borrowck_facts::override_queries?"));
     unsafe {
       std::mem::transmute::<
         &BodyWithBorrowckFacts<'static>,
