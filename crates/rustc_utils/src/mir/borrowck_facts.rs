@@ -1,6 +1,12 @@
 //! Polonius integration to extract borrowck facts from rustc.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+  ptr::addr_of,
+  sync::{
+    atomic::{AtomicBool, Ordering},
+    OnceLock,
+  },
+};
 
 use rustc_borrowck::consumers::{BodyWithBorrowckFacts, ConsumerOptions};
 use rustc_data_structures::fx::FxHashSet as HashSet;
@@ -73,22 +79,19 @@ pub fn override_queries(
   local.mir_borrowck = mir_borrowck;
 }
 
-#[cfg(test)]
+/// A key comprising of the address of the pointer to the global context
+/// (essentially `TyCtxt`) and the actual id. This is needed because in test
+/// cases sometimes there are multiple `TyCtxt`s live at the same time that
+/// assign the same id to a body and race on this cache.
 type CacheKey = (LocalDefId, usize);
 
-#[cfg(not(test))]
-type CacheKey = LocalDefId;
-
 thread_local! {
+  /// See [`CacheKey`] for safety info
   static MIR_BODIES: Cache<CacheKey, BodyWithBorrowckFacts<'static>> = Cache::default();
 }
 
 fn make_key(_tcx: TyCtxt<'_>, def_id: LocalDefId) -> CacheKey {
-  #[cfg(test)]
-  let key = (def_id, std::ptr::addr_of!(*_tcx) as usize);
-  #[cfg(not(test))]
-  let key = def_id;
-  key
+  (def_id, std::ptr::addr_of!(*_tcx) as usize)
 }
 
 fn mir_borrowck(tcx: TyCtxt<'_>, def_id: LocalDefId) -> &BorrowCheckResult<'_> {
