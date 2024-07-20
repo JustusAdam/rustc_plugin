@@ -1,11 +1,8 @@
 //! Polonius integration to extract borrowck facts from rustc.
 
-use std::{
-  ptr::addr_of,
-  sync::{
-    atomic::{AtomicBool, Ordering},
-    OnceLock,
-  },
+use std::sync::{
+  atomic::{AtomicBool, Ordering},
+  OnceLock,
 };
 
 use rustc_borrowck::consumers::{BodyWithBorrowckFacts, ConsumerOptions};
@@ -90,8 +87,9 @@ thread_local! {
   static MIR_BODIES: Cache<CacheKey, BodyWithBorrowckFacts<'static>> = Cache::default();
 }
 
-fn make_key(_tcx: TyCtxt<'_>, def_id: LocalDefId) -> CacheKey {
-  (def_id, std::ptr::addr_of!(*_tcx) as usize)
+fn make_key(tcx: TyCtxt<'_>, def_id: LocalDefId) -> CacheKey {
+  let addr = *tcx as *const _ as usize;
+  (def_id, addr)
 }
 
 fn mir_borrowck(tcx: TyCtxt<'_>, def_id: LocalDefId) -> &BorrowCheckResult<'_> {
