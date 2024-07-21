@@ -17,7 +17,7 @@ use rustc_span::source_map::FileLoader;
 use rustc_target::abi::{FieldIdx, VariantIdx};
 
 use crate::{
-  mir::borrowck_facts,
+  mir::borrowck_facts::{self},
   source_map::{
     filename::{Filename, FilenameIndex},
     find_bodies::find_enclosing_bodies,
@@ -110,13 +110,15 @@ impl CompileBuilder {
     .chain(self.arguments.iter().cloned())
     .collect::<Box<_>>();
 
-    rustc_driver::catch_fatal_errors(|| {
-      let mut compiler = rustc_driver::RunCompiler::new(&args, &mut callbacks);
-      compiler.set_file_loader(Some(Box::new(StringLoader(self.input.clone()))));
-      compiler.run()
-    })
-    .unwrap()
-    .unwrap();
+    with_override_queries(|| {
+      rustc_driver::catch_fatal_errors(|| {
+        let mut compiler = rustc_driver::RunCompiler::new(&args, &mut callbacks);
+        compiler.set_file_loader(Some(Box::new(StringLoader(self.input.clone()))));
+        compiler.run()
+      })
+      .unwrap()
+      .unwrap()
+    });
   }
 }
 

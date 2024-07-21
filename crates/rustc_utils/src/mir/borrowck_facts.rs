@@ -1,9 +1,6 @@
 //! Polonius integration to extract borrowck facts from rustc.
 
-use std::sync::{
-  atomic::{AtomicBool, Ordering},
-  OnceLock,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rustc_borrowck::consumers::{BodyWithBorrowckFacts, ConsumerOptions};
 use rustc_data_structures::fx::FxHashSet as HashSet;
@@ -63,7 +60,6 @@ static SIMPLIFY_MIR: AtomicBool = AtomicBool::new(false);
 pub fn enable_mir_simplification() {
   SIMPLIFY_MIR.store(true, Ordering::SeqCst);
 }
-
 /// You must use this function in [`rustc_driver::Callbacks::config`] to call [`get_body_with_borrowck_facts`].
 ///
 /// For why we need to do override mir_borrowck, see:
@@ -76,20 +72,18 @@ pub fn override_queries(
   local.mir_borrowck = mir_borrowck;
 }
 
-/// A key comprising of the address of the pointer to the global context
-/// (essentially `TyCtxt`) and the actual id. This is needed because in test
-/// cases sometimes there are multiple `TyCtxt`s live at the same time that
-/// assign the same id to a body and race on this cache.
-type CacheKey = (LocalDefId, usize);
-
 thread_local! {
   /// See [`CacheKey`] for safety info
-  static MIR_BODIES: Cache<CacheKey, BodyWithBorrowckFacts<'static>> = Cache::default();
+  static MIR_BODIES:Cache<LocalDefId, BodyWithBorrowckFacts<'static>> = Cache::default();
 }
 
-fn make_key(tcx: TyCtxt<'_>, def_id: LocalDefId) -> CacheKey {
-  let addr = *tcx as *const _ as usize;
-  (def_id, addr)
+pub fn with_override_queries<R>(f: impl FnOnce() -> R) -> R {
+  MIR_BODIES.with(|cache| {
+    assert_eq!(cache.len(), 0);
+    let r = f();
+    unsafe { cache.clear() };
+    r
+  })
 }
 
 fn mir_borrowck(tcx: TyCtxt<'_>, def_id: LocalDefId) -> &BorrowCheckResult<'_> {
@@ -112,7 +106,7 @@ fn mir_borrowck(tcx: TyCtxt<'_>, def_id: LocalDefId) -> &BorrowCheckResult<'_> {
   let body_with_facts: BodyWithBorrowckFacts<'static> =
     unsafe { std::mem::transmute(body_with_facts) };
   MIR_BODIES.with(|cache| {
-    cache.get(make_key(tcx, def_id), |_| body_with_facts);
+    cache.get(def_id, |_| body_with_facts);
   });
 
   let mut providers = Providers::default();
@@ -139,7 +133,7 @@ pub fn get_body_with_borrowck_facts<'tcx>(
 ) -> &'tcx BodyWithBorrowckFacts<'tcx> {
   let _ = tcx.mir_borrowck(def_id);
   MIR_BODIES.with(|cache| {
-    let body = cache.get(make_key(tcx, def_id), |_| panic!("mir_borrowck override should have stored body for item: {def_id:?}. Are you sure you registered borrowck_facts::override_queries?"));
+    let body = cache.get(def_id, |_| panic!("mir_borrowck override should have stored body for item: {def_id:?}. Are you sure you registered borrowck_facts::override_queries?"));
     unsafe {
       std::mem::transmute::<
         &BodyWithBorrowckFacts<'static>,
