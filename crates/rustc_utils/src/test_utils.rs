@@ -17,7 +17,7 @@ use rustc_span::source_map::FileLoader;
 use rustc_target::abi::{FieldIdx, VariantIdx};
 
 use crate::{
-  mir::borrowck_facts::{self},
+  mir::borrowck_facts::{self, with_override_queries},
   source_map::{
     filename::{Filename, FilenameIndex},
     find_bodies::find_enclosing_bodies,
