@@ -77,12 +77,9 @@ thread_local! {
   static MIR_BODIES:Cache<LocalDefId, BodyWithBorrowckFacts<'static>> = Cache::default();
 }
 
-pub fn with_override_queries<R>(f: impl FnOnce() -> R) -> R {
+pub(crate) unsafe fn clear_mir_cache() {
   MIR_BODIES.with(|cache| {
-    assert_eq!(cache.len(), 0);
-    let r = f();
     unsafe { cache.clear() };
-    r
   })
 }
 
