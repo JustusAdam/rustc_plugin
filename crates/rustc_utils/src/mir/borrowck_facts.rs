@@ -77,6 +77,7 @@ thread_local! {
   static MIR_BODIES:Cache<LocalDefId, BodyWithBorrowckFacts<'static>> = Cache::default();
 }
 
+#[cfg(feature = "test")]
 pub(crate) unsafe fn clear_mir_cache() {
   MIR_BODIES.with(|cache| {
     unsafe { cache.clear() };
