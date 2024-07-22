@@ -74,7 +74,7 @@ pub fn override_queries(
 
 thread_local! {
   /// See [`CacheKey`] for safety info
-  static MIR_BODIES:Cache<LocalDefId, BodyWithBorrowckFacts<'static>> = Cache::default();
+  pub static MIR_BODIES:Cache<LocalDefId, BodyWithBorrowckFacts<'static>> = Cache::default();
 }
 
 #[cfg(feature = "test")]
