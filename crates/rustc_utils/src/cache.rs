@@ -98,21 +98,40 @@ where
     key: In,
     compute: impl FnOnce(In) -> Out,
   ) -> Option<&'a Out> {
+    match self.try_retrieve(key, |in_| Some(compute(in_))) {
+      Retrieval::Recursive => None,
+      Retrieval::Success(v) => Some(v),
+      Retrieval::Uncomputable => unreachable!(),
+    }
+  }
+
+  /// Try to retrieve a value from the cache with a potentially fallible or
+  /// recursive computation.
+  pub fn try_retrieve<'a>(
+    &'a self,
+    key: In,
+    compute: impl FnOnce(In) -> Option<Out>,
+  ) -> Retrieval<&'a Out> {
     if !self.0.borrow().contains_key(&key) {
       self.0.borrow_mut().insert(key.clone(), None);
-      let out = Box::pin(compute(key.clone()));
-      self.0.borrow_mut().insert(key.clone(), Some(out));
+      if let Some(out) = compute(key.clone()) {
+        self.0.borrow_mut().insert(key.clone(), Some(Box::pin(out)));
+      } else {
+        self.0.borrow_mut().remove(&key);
+      }
     }
 
     let cache = self.0.borrow();
-    // Important here to first `unwrap` the `Option` created by `get`, then
-    // propagate the potential option stored in the map.
-    let entry = cache.get(&key).expect("invariant broken").as_ref()?;
-
-    // SAFETY: because the entry is pinned, it cannot move and this pointer will
-    // only be invalidated if Cache is dropped. The returned reference has a lifetime
-    // equal to Cache, so Cache cannot be dropped before this reference goes out of scope.
-    Some(unsafe { std::mem::transmute::<&'_ Out, &'a Out>(&**entry) })
+    match cache.get(&key) {
+      None => Retrieval::Uncomputable,
+      Some(None) => Retrieval::Recursive,
+      Some(Some(entry)) => Retrieval::Success(
+        // SAFETY: because the entry is pinned, it cannot move and this pointer will
+        // only be invalidated if Cache is dropped. The returned reference has a lifetime
+        // equal to Cache, so Cache cannot be dropped before this reference goes out of scope.
+        unsafe { std::mem::transmute::<&'_ Out, &'a Out>(&**entry) },
+      ),
+    }
   }
 
   pub fn is_in_cache(&self, key: &In) -> bool {
@@ -121,6 +140,21 @@ where
   /// Safety: Invalidates all references
   pub(crate) unsafe fn clear(&self) {
     self.0.borrow_mut().clear()
+  }
+}
+
+pub enum Retrieval<T> {
+  Success(T),
+  Recursive,
+  Uncomputable,
+}
+
+impl<T> Retrieval<T> {
+  pub fn as_success(self) -> Option<T> {
+    match self {
+      Retrieval::Success(v) => Some(v),
+      _ => None,
+    }
   }
 }
 
