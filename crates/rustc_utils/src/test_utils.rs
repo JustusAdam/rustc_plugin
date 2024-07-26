@@ -1,7 +1,8 @@
 //! Running rustc and Flowistry in tests.
 
 use std::{
-  fmt::Debug, fs, hash::Hash, io, panic, path::Path, process::Command, sync::LazyLock,
+  borrow::Cow, fmt::Debug, fs, hash::Hash, io, panic, path::Path, process::Command,
+  sync::LazyLock,
 };
 
 use anyhow::{anyhow, ensure, Context, Result};
@@ -71,6 +72,7 @@ thread_local! {
 pub struct CompileBuilder {
   input: String,
   arguments: Vec<String>,
+  filename: Cow<'static, str>,
 }
 
 impl CompileBuilder {
@@ -78,6 +80,7 @@ impl CompileBuilder {
     Self {
       input: input.into(),
       arguments: vec![],
+      filename: Cow::Borrowed(DUMMY_FILE_NAME),
     }
   }
 
@@ -87,13 +90,18 @@ impl CompileBuilder {
     self
   }
 
+  pub fn with_filename(&mut self, name: String) -> &mut Self {
+    self.filename = Cow::Owned(name);
+    self
+  }
+
   pub fn compile(&self, f: impl for<'tcx> FnOnce(CompileResult<'tcx>) + Send) {
     let mut callbacks = TestCallbacks {
       callback: Some(move |tcx: TyCtxt<'_>| f(CompileResult { tcx })),
     };
     let args = [
       "rustc",
-      DUMMY_FILE_NAME,
+      &self.filename,
       "--crate-type",
       "lib",
       "--edition=2021",
