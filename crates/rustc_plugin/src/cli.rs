@@ -58,11 +58,32 @@ pub fn cli_main<T: RustcPlugin>(plugin: T) {
     .expect("current executable path invalid")
     .with_file_name(plugin.driver_name().as_ref());
 
+  let exec_hash = {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path
+      .metadata()
+      .unwrap()
+      .modified()
+      .unwrap()
+      .hash(&mut hasher);
+    std::env::current_exe()
+      .unwrap()
+      .metadata()
+      .unwrap()
+      .modified()
+      .unwrap()
+      .hash(&mut hasher);
+    hasher.finish()
+  };
+
   if cfg!(windows) {
     path.set_extension("exe");
   }
 
-  let prior_rustflags = prior_rustflags().unwrap();
+  let mut prior_rustflags = prior_rustflags().unwrap();
+
+  prior_rustflags.push(format!("{}\x1f{exec_hash:x}", crate::EXEC_HASH_ARG));
 
   cmd
     .env(

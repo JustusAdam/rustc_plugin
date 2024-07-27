@@ -9,6 +9,8 @@ extern crate rustc_driver;
 extern crate rustc_interface;
 extern crate rustc_session;
 
+const EXEC_HASH_ARG: &str = "--exec-hash";
+
 #[doc(hidden)]
 pub use cargo_metadata::camino::Utf8Path;
 pub use cli::cli_main;
