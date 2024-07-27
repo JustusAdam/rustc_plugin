@@ -12,6 +12,7 @@ use rustc_data_structures::fx::{FxHashMap as HashMap, FxHashSet as HashSet};
 use rustc_hir::{BodyId, ItemKind};
 use rustc_middle::{
   mir::{Body, HasLocalDecls, Local, Place},
+  query::{ExternProviders, Providers},
   ty::TyCtxt,
 };
 use rustc_span::source_map::FileLoader;
@@ -72,7 +73,8 @@ thread_local! {
 pub struct CompileBuilder {
   input: String,
   arguments: Vec<String>,
-  filename: Cow<'static, str>,
+  query_override:
+    Option<fn(&rustc_session::Session, &mut Providers, &mut ExternProviders)>,
 }
 
 impl CompileBuilder {
@@ -80,7 +82,7 @@ impl CompileBuilder {
     Self {
       input: input.into(),
       arguments: vec![],
-      filename: Cow::Borrowed(DUMMY_FILE_NAME),
+      query_override: Some(borrowck_facts::override_queries),
     }
   }
 
@@ -90,18 +92,23 @@ impl CompileBuilder {
     self
   }
 
-  pub fn with_filename(&mut self, name: String) -> &mut Self {
-    self.filename = Cow::Owned(name);
+  pub fn with_query_override(
+    &mut self,
+    query_override: Option<
+      fn(&rustc_session::Session, &mut Providers, &mut ExternProviders),
+    >,
+  ) -> &mut Self {
+    self.query_override = query_override;
     self
   }
 
   pub fn compile(&self, f: impl for<'tcx> FnOnce(CompileResult<'tcx>) + Send) {
-    let mut callbacks = TestCallbacks {
-      callback: Some(move |tcx: TyCtxt<'_>| f(CompileResult { tcx })),
-    };
+    let temp_dir = std::env::temp_dir();
+    let random = rand::random::<u64>() / 0x100_000_000_u64;
+    let crate_name = format!("crate{random:x}");
     let args = [
       "rustc",
-      &self.filename,
+      &crate_name,
       "--crate-type",
       "lib",
       "--edition=2021",
@@ -112,11 +119,18 @@ impl CompileBuilder {
       "warnings",
       "--sysroot",
       &*SYSROOT,
+      "--out-dir",
+      &format!("{}", temp_dir.display()),
     ]
     .into_iter()
     .map(|s| s.to_owned())
     .chain(self.arguments.iter().cloned())
     .collect::<Box<_>>();
+
+    let mut callbacks = TestCallbacks {
+      query_override: self.query_override,
+      callback: Some(move |tcx: TyCtxt<'_>| f(CompileResult { crate_name, tcx })),
+    };
 
     rustc_driver::catch_fatal_errors(|| {
       let mut compiler = rustc_driver::RunCompiler::new(&args, &mut callbacks);
@@ -130,6 +144,7 @@ impl CompileBuilder {
 
 pub struct CompileResult<'tcx> {
   pub tcx: TyCtxt<'tcx>,
+  pub crate_name: String,
 }
 
 impl<'tcx> CompileResult<'tcx> {
@@ -169,6 +184,8 @@ impl<'tcx> CompileResult<'tcx> {
 
 struct TestCallbacks<Cb> {
   callback: Option<Cb>,
+  query_override:
+    Option<fn(&rustc_session::Session, &mut Providers, &mut ExternProviders)>,
 }
 
 impl<Cb> rustc_driver::Callbacks for TestCallbacks<Cb>
@@ -176,7 +193,7 @@ where
   Cb: FnOnce(TyCtxt<'_>),
 {
   fn config(&mut self, config: &mut rustc_interface::Config) {
-    config.override_queries = Some(borrowck_facts::override_queries);
+    config.override_queries = self.query_override;
   }
 
   fn after_expansion<'tcx>(
