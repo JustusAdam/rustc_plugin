@@ -92,7 +92,7 @@ macro_rules! m {
 // Ignore macro-generated bodies
 m!{}
 "#;
-    test_utils::CompileBuilder::new(input).compile(|CompileResult { tcx }| {
+    test_utils::CompileBuilder::new(input).expect_compile(|CompileResult { tcx }| {
       assert_eq!(find_bodies(tcx).len(), 3);
     });
   }

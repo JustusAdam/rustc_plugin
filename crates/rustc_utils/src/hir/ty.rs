@@ -76,7 +76,7 @@ fn main() {
   let y = 0;
 }"#;
 
-    test_utils::CompileBuilder::new(input).compile(|result| {
+    test_utils::CompileBuilder::new(input).expect_compile(|result| {
       let tcx = result.tcx;
       let body = result.as_body().1;
       let body = &body.body;

@@ -1,8 +1,7 @@
 //! Running rustc and Flowistry in tests.
 
 use std::{
-  borrow::Cow, fmt::Debug, fs, hash::Hash, io, panic, path::Path, process::Command,
-  sync::LazyLock,
+  fmt::Debug, fs, hash::Hash, io, panic, path::Path, process::Command, sync::LazyLock,
 };
 
 use anyhow::{anyhow, ensure, Context, Result};
@@ -10,6 +9,7 @@ use log::debug;
 use rustc_borrowck::consumers::BodyWithBorrowckFacts;
 use rustc_data_structures::fx::{FxHashMap as HashMap, FxHashSet as HashSet};
 use rustc_hir::{BodyId, ItemKind};
+use rustc_interface::interface;
 use rustc_middle::{
   mir::{Body, HasLocalDecls, Local, Place},
   query::{ExternProviders, Providers},
@@ -102,7 +102,14 @@ impl CompileBuilder {
     self
   }
 
-  pub fn compile(&self, f: impl for<'tcx> FnOnce(CompileResult<'tcx>) + Send) {
+  pub fn expect_compile(&self, f: impl for<'tcx> FnOnce(CompileResult<'tcx>) + Send) {
+    self.compile(f).unwrap()
+  }
+
+  pub fn compile(
+    &self,
+    f: impl for<'tcx> FnOnce(CompileResult<'tcx>) + Send,
+  ) -> interface::Result<()> {
     let temp_dir = std::env::temp_dir();
     let random = rand::random::<u64>() / 0x100_000_000_u64;
     let crate_name = format!("crate{random:x}");
@@ -136,9 +143,7 @@ impl CompileBuilder {
       let mut compiler = rustc_driver::RunCompiler::new(&args, &mut callbacks);
       compiler.set_file_loader(Some(Box::new(StringLoader(self.input.clone()))));
       compiler.run()
-    })
-    .unwrap()
-    .unwrap()
+    })?
   }
 }
 

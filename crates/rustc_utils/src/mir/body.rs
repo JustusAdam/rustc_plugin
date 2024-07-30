@@ -268,7 +268,7 @@ mod test {
       y
     }"#;
 
-    test_utils::CompileBuilder::new(input).compile(|result| {
+    test_utils::CompileBuilder::new(input).expect_compile(|result| {
       let body = result.as_body().1;
       let body = &body.body;
       assert_eq!(body.regions_in_args().count(), 2);

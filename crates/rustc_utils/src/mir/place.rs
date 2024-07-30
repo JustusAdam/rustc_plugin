@@ -737,7 +737,7 @@ fn foobar(x: &i32) {
   let box_ref = Box::new(x);
 }
 "#;
-    test_utils::CompileBuilder::new(input).compile(|result| {
+    test_utils::CompileBuilder::new(input).expect_compile(|result| {
       let tcx = result.tcx;
       let (_, body_with_facts) = result.as_body();
       let body = &body_with_facts.body;
@@ -797,7 +797,7 @@ fn main() {
   let p = &Point { x: 0, y: 0 };
 }
     "#;
-    test_utils::CompileBuilder::new(input).compile(|result| {
+    test_utils::CompileBuilder::new(input).expect_compile(|result| {
       let tcx = result.tcx;
       let (_, body_with_facts) = result.as_body();
       let body = &body_with_facts.body;
@@ -865,6 +865,6 @@ fn main() {
         [y1],
       );
     }
-    test_utils::CompileBuilder::new(input).compile(callback);
+    test_utils::CompileBuilder::new(input).expect_compile(callback);
   }
 }

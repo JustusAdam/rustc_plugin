@@ -403,7 +403,7 @@ mod test {
 "#
     );
 
-    test_utils::CompileBuilder::new(input).compile(|CompileResult { tcx }| {
+    test_utils::CompileBuilder::new(input).expect_compile(|CompileResult { tcx }| {
       let source_map = tcx.sess.source_map();
       let filename = Filename::intern("dummy.rs");
       filename.find_source_file(source_map).unwrap();
