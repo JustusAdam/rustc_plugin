@@ -1,8 +1,8 @@
-use std::{borrow::Cow, path::PathBuf, process::Command};
+use std::{borrow::Cow, hash::Hasher, path::PathBuf, process::Command};
 
 use cargo_metadata::camino::Utf8Path;
-use serde::{de::DeserializeOwned, Serialize};
 use rustc_tools_util::VersionInfo;
+use serde::{de::DeserializeOwned, Serialize};
 
 /// Specification of a set of crates.
 pub enum CrateFilter {
@@ -50,6 +50,8 @@ pub trait RustcPlugin: Sized {
 
   /// Parses and returns the CLI arguments for the plugin.
   fn args(&self, target_dir: &Utf8Path) -> RustcPluginArgs<Self::Args>;
+
+  fn hash_config(&self, _args: &Self::Args, _hasher: &mut impl Hasher) {}
 
   /// Optionally modify the `cargo` command that launches rustc.
   /// For example, you could pass a `--feature` flag here.
