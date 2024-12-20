@@ -7,7 +7,10 @@ use std::{
 use anyhow::{anyhow, ensure, Context, Result};
 use log::debug;
 use rustc_borrowck::consumers::BodyWithBorrowckFacts;
-use rustc_data_structures::fx::{FxHashMap as HashMap, FxHashSet as HashSet};
+use rustc_data_structures::{
+  fx::{FxHashMap as HashMap, FxHashSet as HashSet},
+  sync::Lrc,
+};
 use rustc_hir::{BodyId, ItemKind};
 use rustc_middle::{
   mir::{Body, HasLocalDecls, Local, Place},
@@ -36,8 +39,8 @@ impl FileLoader for StringLoader {
     Ok(self.0.clone())
   }
 
-  fn read_binary_file(&self, path: &Path) -> io::Result<Vec<u8>> {
-    fs::read(path)
+  fn read_binary_file(&self, path: &Path) -> io::Result<Lrc<[u8]>> {
+    Ok(fs::read(path)?.into())
   }
 }
 
@@ -66,14 +69,106 @@ thread_local! {
   });
 }
 
-pub fn compile_body_with_range(
+/// Programmatically build a rustc compilation session
+pub struct CompileBuilder {
+  input: String,
+  arguments: Vec<String>,
+}
+
+impl CompileBuilder {
+  /// Initialize a compilation from this string of source code.
+  pub fn new(input: impl Into<String>) -> Self {
+    Self {
+      input: input.into(),
+      arguments: vec![],
+    }
+  }
+
+  /// Append additional rustc arguments
+  pub fn with_args(&mut self, args: impl IntoIterator<Item = String>) -> &mut Self {
+    self.arguments.extend(args);
+    self
+  }
+
+  /// Perform the compilation, providing access to it's intermediates state to
+  /// the provided closure
+  pub fn compile(&self, f: impl for<'tcx> FnOnce(CompileResult<'tcx>) + Send) {
+    let mut callbacks = TestCallbacks {
+      callback: Some(move |tcx: TyCtxt<'_>| f(CompileResult { tcx })),
+    };
+    let args = [
+      "rustc",
+      DUMMY_FILE_NAME,
+      "--crate-type",
+      "lib",
+      "--edition=2021",
+      "-Zidentify-regions",
+      "-Zmir-opt-level=0",
+      "-Zmaximal-hir-to-mir-coverage",
+      "--allow",
+      "warnings",
+      "--sysroot",
+      &*SYSROOT,
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .chain(self.arguments.iter().cloned())
+    .collect::<Box<_>>();
+
+    rustc_driver::catch_fatal_errors(|| {
+      let mut compiler = rustc_driver::RunCompiler::new(&args, &mut callbacks);
+      compiler.set_file_loader(Some(Box::new(StringLoader(self.input.clone()))));
+      compiler.run();
+    })
+    .unwrap();
+  }
+}
+
+/// Convenience alias for `CompileBuilder::new(input).compile(...)` if the
+/// callback is going to use [`CompileResult::as_body`].
+pub fn compile_body(
   input: impl Into<String>,
-  compute_target: impl FnOnce() -> ByteRange + Send,
-  callback: impl for<'tcx> FnOnce(TyCtxt<'tcx>, BodyId, &'tcx BodyWithBorrowckFacts<'tcx>, ByteRange)
+  callback: impl for<'tcx> FnOnce(TyCtxt<'tcx>, BodyId, &'tcx BodyWithBorrowckFacts<'tcx>)
     + Send,
 ) {
-  compile(input, |tcx| {
-    let target = compute_target();
+  CompileBuilder::new(input).compile(|result| {
+    let (body_id, body_with_facts) = result.as_body();
+    callback(result.tcx, body_id, body_with_facts);
+  });
+}
+
+/// State during the rust compilation. Most of the time you only care about
+/// `self.tcx`, but this wrapper provides additional convenience methods for
+/// getting, e.g. the body of the configured entrypoint.
+pub struct CompileResult<'tcx> {
+  pub tcx: TyCtxt<'tcx>,
+}
+
+impl<'tcx> CompileResult<'tcx> {
+  /// Assume that we compiled only one function and return that function's id and body.
+  pub fn as_body(&self) -> (BodyId, &'tcx BodyWithBorrowckFacts<'tcx>) {
+    let tcx = self.tcx;
+    let hir = tcx.hir();
+    let body_id = hir
+      .items()
+      .find_map(|id| match hir.item(id).kind {
+        ItemKind::Fn(_, _, body) => Some(body),
+        _ => None,
+      })
+      .unwrap();
+
+    let def_id = tcx.hir().body_owner_def_id(body_id);
+    let body_with_facts = borrowck_facts::get_body_with_borrowck_facts(tcx, def_id);
+    debug!("{}", body_with_facts.body.to_string(tcx).unwrap());
+    (body_id, body_with_facts)
+  }
+
+  /// Find a body in the target byte range.
+  pub fn as_body_with_range(
+    &self,
+    target: ByteRange,
+  ) -> (BodyId, &'tcx BodyWithBorrowckFacts<'tcx>) {
+    let tcx = self.tcx;
     let body_id = find_enclosing_bodies(tcx, target.to_span(tcx).unwrap())
       .next()
       .unwrap();
@@ -81,51 +176,8 @@ pub fn compile_body_with_range(
     let body_with_facts = borrowck_facts::get_body_with_borrowck_facts(tcx, def_id);
     debug!("{}", body_with_facts.body.to_string(tcx).unwrap());
 
-    callback(tcx, body_id, body_with_facts, target);
-  })
-}
-
-pub fn compile_body(
-  input: impl Into<String>,
-  callback: impl for<'tcx> FnOnce(TyCtxt<'tcx>, BodyId, &'tcx BodyWithBorrowckFacts<'tcx>)
-    + Send,
-) {
-  compile(input, |tcx| {
-    let hir = tcx.hir();
-    let body_id = hir
-      .items()
-      .filter_map(|id| match hir.item(id).kind {
-        ItemKind::Fn(_, _, body) => Some(body),
-        _ => None,
-      })
-      .next()
-      .unwrap();
-
-    let def_id = tcx.hir().body_owner_def_id(body_id);
-    let body_with_facts = borrowck_facts::get_body_with_borrowck_facts(tcx, def_id);
-    debug!("{}", body_with_facts.body.to_string(tcx).unwrap());
-
-    callback(tcx, body_id, body_with_facts);
-  })
-}
-
-pub fn compile(input: impl Into<String>, callback: impl FnOnce(TyCtxt<'_>) + Send) {
-  let mut callbacks = TestCallbacks {
-    callback: Some(callback),
-  };
-  let args = format!(
-    "rustc {DUMMY_FILE_NAME} --crate-type lib --edition=2021 -Z identify-regions -Z mir-opt-level=0 -Z maximal-hir-to-mir-coverage --allow warnings --sysroot {}",
-    &*SYSROOT
-  );
-  let args = args.split(' ').map(|s| s.to_string()).collect::<Vec<_>>();
-
-  rustc_driver::catch_fatal_errors(|| {
-    let mut compiler = rustc_driver::RunCompiler::new(&args, &mut callbacks);
-    compiler.set_file_loader(Some(Box::new(StringLoader(input.into()))));
-    compiler.run()
-  })
-  .unwrap()
-  .unwrap();
+    (body_id, body_with_facts)
+  }
 }
 
 struct TestCallbacks<Cb> {
@@ -140,15 +192,13 @@ where
     config.override_queries = Some(borrowck_facts::override_queries);
   }
 
-  fn after_expansion<'tcx>(
+  fn after_analysis(
     &mut self,
     _compiler: &rustc_interface::interface::Compiler,
-    queries: &'tcx rustc_interface::Queries<'tcx>,
+    tcx: TyCtxt<'_>,
   ) -> rustc_driver::Compilation {
-    queries.global_ctxt().unwrap().enter(|tcx| {
-      let callback = self.callback.take().unwrap();
-      callback(tcx);
-    });
+    let callback = self.callback.take().unwrap();
+    callback(tcx);
     rustc_driver::Compilation::Stop
   }
 }
@@ -215,7 +265,7 @@ pub fn parse_ranges(
   Ok((prog_clean, ranges))
 }
 
-pub fn color_ranges(prog: &str, all_ranges: Vec<(&str, &HashSet<ByteRange>)>) -> String {
+pub fn color_ranges(prog: &str, all_ranges: &[(&str, &HashSet<ByteRange>)]) -> String {
   let mut new_tokens = all_ranges
     .iter()
     .flat_map(|(_, ranges)| {
@@ -230,7 +280,7 @@ pub fn color_ranges(prog: &str, all_ranges: Vec<(&str, &HashSet<ByteRange>)>) ->
       })
     })
     .collect::<Vec<_>>();
-  new_tokens.sort_by_key(|(_, i)| -(i.0 as isize));
+  new_tokens.sort_by_key(|(_, i)| -(isize::try_from(i.0).unwrap()));
 
   let mut output = prog.to_owned();
   for (s, i) in new_tokens {
@@ -241,21 +291,21 @@ pub fn color_ranges(prog: &str, all_ranges: Vec<(&str, &HashSet<ByteRange>)>) ->
 }
 
 pub fn fmt_ranges(prog: &str, s: &HashSet<ByteRange>) -> String {
-  textwrap::indent(&color_ranges(prog, vec![("", s)]), "  ")
+  textwrap::indent(&color_ranges(prog, &[("", s)]), "  ")
 }
 
 pub fn compare_ranges(
-  expected: HashSet<ByteRange>,
-  actual: HashSet<ByteRange>,
+  expected: &HashSet<ByteRange>,
+  actual: &HashSet<ByteRange>,
   prog: &str,
 ) {
-  let missing = &expected - &actual;
-  let extra = &actual - &expected;
+  let missing = expected - actual;
+  let extra = actual - expected;
 
   let check = |s: HashSet<ByteRange>, message: &str| {
     if s.len() > 0 {
-      println!("Expected ranges:\n{}", fmt_ranges(prog, &expected));
-      println!("Actual ranges:\n{}", fmt_ranges(prog, &actual));
+      println!("Expected ranges:\n{}", fmt_ranges(prog, expected));
+      println!("Actual ranges:\n{}", fmt_ranges(prog, actual));
       panic!("{message} ranges:\n{}", fmt_ranges(prog, &s));
     }
   };
@@ -296,7 +346,7 @@ pub struct PlaceBuilder<'a, 'tcx> {
   place: Place<'tcx>,
 }
 
-impl<'a, 'tcx> PlaceBuilder<'a, 'tcx> {
+impl<'tcx> PlaceBuilder<'_, 'tcx> {
   pub fn field(mut self, i: usize) -> Self {
     let f = FieldIdx::from_usize(i);
     let ty = self
@@ -382,7 +432,7 @@ mod test {
           end: BytePos(3),
           filename: *filename,
         },
-      ])
+      ]);
     });
   }
 }

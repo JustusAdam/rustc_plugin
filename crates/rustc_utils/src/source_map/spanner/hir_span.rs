@@ -16,7 +16,7 @@ struct ChildExprSpans {
   spans: Vec<Span>,
   item_span: Span,
 }
-impl<'hir> HirVisitor<'hir> for ChildExprSpans {
+impl HirVisitor<'_> for ChildExprSpans {
   fn visit_expr(&mut self, ex: &hir::Expr) {
     match ex.kind {
       // Don't take the span for the whole block, since we want to leave
@@ -84,11 +84,11 @@ macro_rules! try_span {
   };
 }
 
-impl<'tcx> Spanner<'tcx> {
+impl Spanner<'_> {
   pub fn hir_spans(&self, id: HirId, mode: EnclosingHirSpans) -> Option<Vec<Span>> {
     let hir = self.tcx.hir();
     let span = try_span!(self, hir.span(id));
-    let inner_spans = match hir.get(id) {
+    let inner_spans = match self.tcx.hir_node(id) {
       Node::Expr(expr) => match expr.kind {
         ExprKind::Loop(_, _, loop_source, header) => match loop_source {
           LoopSource::ForLoop | LoopSource::While => {
