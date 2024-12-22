@@ -74,6 +74,7 @@ pub fn cli_main<T: RustcPlugin>(plugin: T) {
       .modified()
       .unwrap()
       .hash(&mut hasher);
+    plugin.hash_config(&args.args, &mut hasher);
     hasher.finish()
   };
 
