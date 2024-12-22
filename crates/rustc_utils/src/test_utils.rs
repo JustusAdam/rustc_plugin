@@ -7,7 +7,10 @@ use std::{
 use anyhow::{anyhow, ensure, Context, Result};
 use log::debug;
 use rustc_borrowck::consumers::BodyWithBorrowckFacts;
-use rustc_data_structures::fx::{FxHashMap as HashMap, FxHashSet as HashSet};
+use rustc_data_structures::{
+  fx::{FxHashMap as HashMap, FxHashSet as HashSet},
+  sync::Lrc,
+};
 use rustc_hir::{BodyId, ItemKind};
 use rustc_interface::interface;
 use rustc_middle::{
@@ -38,8 +41,8 @@ impl FileLoader for StringLoader {
     Ok(self.0.clone())
   }
 
-  fn read_binary_file(&self, path: &Path) -> io::Result<Vec<u8>> {
-    fs::read(path)
+  fn read_binary_file(&self, path: &Path) -> io::Result<Lrc<[u8]>> {
+    Ok(fs::read(path)?.into())
   }
 }
 
@@ -73,16 +76,14 @@ thread_local! {
 pub struct CompileBuilder {
   input: String,
   arguments: Vec<String>,
-  query_override:
-    Option<fn(&rustc_session::Session, &mut Providers, &mut ExternProviders)>,
 }
 
 impl CompileBuilder {
+  /// Initialize a compilation from this string of source code.
   pub fn new(input: impl Into<String>) -> Self {
     Self {
       input: input.into(),
       arguments: vec![],
-      query_override: Some(borrowck_facts::override_queries),
     }
   }
 
@@ -90,20 +91,6 @@ impl CompileBuilder {
   pub fn with_args(&mut self, args: impl IntoIterator<Item = String>) -> &mut Self {
     self.arguments.extend(args);
     self
-  }
-
-  pub fn with_query_override(
-    &mut self,
-    query_override: Option<
-      fn(&rustc_session::Session, &mut Providers, &mut ExternProviders),
-    >,
-  ) -> &mut Self {
-    self.query_override = query_override;
-    self
-  }
-
-  pub fn expect_compile(&self, f: impl for<'tcx> FnOnce(CompileResult<'tcx>) + Send) {
-    self.compile(f).unwrap()
   }
 
   pub fn compile(
@@ -135,7 +122,6 @@ impl CompileBuilder {
     .collect::<Box<_>>();
 
     let mut callbacks = TestCallbacks {
-      query_override: self.query_override,
       callback: Some(move |tcx: TyCtxt<'_>| f(CompileResult { crate_name, tcx })),
     };
 
@@ -143,8 +129,24 @@ impl CompileBuilder {
       let mut compiler = rustc_driver::RunCompiler::new(&args, &mut callbacks);
       compiler.set_file_loader(Some(Box::new(StringLoader(self.input.clone()))));
       compiler.run()
-    })?
+    })
+    .unwrap();
+    Ok(())
   }
+
+  pub fn expect_compile(&self, f: impl for<'tcx> FnOnce(CompileResult<'tcx>) + Send) {
+    self.compile(f).unwrap();
+  }
+}
+
+pub fn compile_body(
+  input: &str,
+  f: impl for<'tcx> FnOnce(TyCtxt<'tcx>, BodyId, &'tcx BodyWithBorrowckFacts<'tcx>) + Send,
+) {
+  CompileBuilder::new(input).expect_compile(|res| {
+    let (body_id, body_with_facts) = res.as_body();
+    f(res.tcx, body_id, body_with_facts);
+  })
 }
 
 pub struct CompileResult<'tcx> {
@@ -174,7 +176,7 @@ impl<'tcx> CompileResult<'tcx> {
   pub fn as_body_with_range(
     &self,
     target: ByteRange,
-  ) -> (BodyId, &'tcx BodyWithBorrowckFacts) {
+  ) -> (BodyId, &'tcx BodyWithBorrowckFacts<'tcx>) {
     let tcx = self.tcx;
     let body_id = find_enclosing_bodies(tcx, target.to_span(tcx).unwrap())
       .next()
@@ -189,28 +191,19 @@ impl<'tcx> CompileResult<'tcx> {
 
 struct TestCallbacks<Cb> {
   callback: Option<Cb>,
-  query_override:
-    Option<fn(&rustc_session::Session, &mut Providers, &mut ExternProviders)>,
 }
 
 impl<Cb> rustc_driver::Callbacks for TestCallbacks<Cb>
 where
   Cb: FnOnce(TyCtxt<'_>),
 {
-  fn config(&mut self, config: &mut rustc_interface::Config) {
-    config.override_queries = self.query_override;
-  }
-
-  fn after_expansion<'tcx>(
+  fn after_analysis(
     &mut self,
     _compiler: &rustc_interface::interface::Compiler,
-    queries: &'tcx rustc_interface::Queries<'tcx>,
+    tcx: TyCtxt<'_>,
   ) -> rustc_driver::Compilation {
-    queries.global_ctxt().unwrap().enter(|tcx| {
-      let callback = self.callback.take().unwrap();
-      callback(tcx);
-    });
-    unsafe { clear_mir_cache() };
+    let callback = self.callback.take().unwrap();
+    callback(tcx);
     rustc_driver::Compilation::Stop
   }
 }
@@ -277,7 +270,7 @@ pub fn parse_ranges(
   Ok((prog_clean, ranges))
 }
 
-pub fn color_ranges(prog: &str, all_ranges: Vec<(&str, &HashSet<ByteRange>)>) -> String {
+pub fn color_ranges(prog: &str, all_ranges: &[(&str, &HashSet<ByteRange>)]) -> String {
   let mut new_tokens = all_ranges
     .iter()
     .flat_map(|(_, ranges)| {
@@ -292,7 +285,7 @@ pub fn color_ranges(prog: &str, all_ranges: Vec<(&str, &HashSet<ByteRange>)>) ->
       })
     })
     .collect::<Vec<_>>();
-  new_tokens.sort_by_key(|(_, i)| -(i.0 as isize));
+  new_tokens.sort_by_key(|(_, i)| -(isize::try_from(i.0).unwrap()));
 
   let mut output = prog.to_owned();
   for (s, i) in new_tokens {
@@ -303,21 +296,21 @@ pub fn color_ranges(prog: &str, all_ranges: Vec<(&str, &HashSet<ByteRange>)>) ->
 }
 
 pub fn fmt_ranges(prog: &str, s: &HashSet<ByteRange>) -> String {
-  textwrap::indent(&color_ranges(prog, vec![("", s)]), "  ")
+  textwrap::indent(&color_ranges(prog, &[("", s)]), "  ")
 }
 
 pub fn compare_ranges(
-  expected: HashSet<ByteRange>,
-  actual: HashSet<ByteRange>,
+  expected: &HashSet<ByteRange>,
+  actual: &HashSet<ByteRange>,
   prog: &str,
 ) {
-  let missing = &expected - &actual;
-  let extra = &actual - &expected;
+  let missing = expected - actual;
+  let extra = actual - expected;
 
   let check = |s: HashSet<ByteRange>, message: &str| {
     if s.len() > 0 {
-      println!("Expected ranges:\n{}", fmt_ranges(prog, &expected));
-      println!("Actual ranges:\n{}", fmt_ranges(prog, &actual));
+      println!("Expected ranges:\n{}", fmt_ranges(prog, expected));
+      println!("Actual ranges:\n{}", fmt_ranges(prog, actual));
       panic!("{message} ranges:\n{}", fmt_ranges(prog, &s));
     }
   };
@@ -358,7 +351,7 @@ pub struct PlaceBuilder<'a, 'tcx> {
   place: Place<'tcx>,
 }
 
-impl<'a, 'tcx> PlaceBuilder<'a, 'tcx> {
+impl<'tcx> PlaceBuilder<'_, 'tcx> {
   pub fn field(mut self, i: usize) -> Self {
     let f = FieldIdx::from_usize(i);
     let ty = self
@@ -444,7 +437,7 @@ mod test {
           end: BytePos(3),
           filename: *filename,
         },
-      ])
+      ]);
     });
   }
 }

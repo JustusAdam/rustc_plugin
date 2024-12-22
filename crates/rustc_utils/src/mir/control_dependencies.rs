@@ -9,12 +9,11 @@
 use std::fmt;
 
 use rustc_data_structures::graph::{
-  dominators::{Dominators, Iter as DominatorsIter},
-  vec_graph::VecGraph,
-  *,
+  dominators, dominators::Dominators, iterate, vec_graph::VecGraph, ControlFlowGraph,
+  DirectedGraph, Predecessors, StartNode, Successors,
 };
 use rustc_index::{
-  bit_set::{BitSet, HybridBitSet, SparseBitMatrix},
+  bit_set::{BitSet, SparseBitMatrix},
   Idx,
 };
 use smallvec::SmallVec;
@@ -27,27 +26,20 @@ struct ReversedGraph<'a, G: ControlFlowGraph> {
 
 impl<G: ControlFlowGraph> DirectedGraph for ReversedGraph<'_, G> {
   type Node = G::Node;
-}
 
-impl<G: ControlFlowGraph> WithStartNode for ReversedGraph<'_, G> {
-  fn start_node(&self) -> Self::Node {
-    self.exit
-  }
-}
-
-impl<G: ControlFlowGraph> WithNumNodes for ReversedGraph<'_, G> {
   fn num_nodes(&self) -> usize {
     self.graph.num_nodes()
   }
 }
 
-impl<'graph, G: ControlFlowGraph> GraphSuccessors<'graph> for ReversedGraph<'_, G> {
-  type Item = G::Node;
-  type Iter = smallvec::IntoIter<[Self::Item; 4]>;
+impl<G: ControlFlowGraph> StartNode for ReversedGraph<'_, G> {
+  fn start_node(&self) -> Self::Node {
+    self.exit
+  }
 }
 
-impl<G: ControlFlowGraph> WithSuccessors for ReversedGraph<'_, G> {
-  fn successors(&self, node: Self::Node) -> <Self as GraphSuccessors<'_>>::Iter {
+impl<G: ControlFlowGraph> Successors for ReversedGraph<'_, G> {
+  fn successors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
     self
       .graph
       .predecessors(node)
@@ -60,13 +52,8 @@ impl<G: ControlFlowGraph> WithSuccessors for ReversedGraph<'_, G> {
   }
 }
 
-impl<'graph, G: ControlFlowGraph> GraphPredecessors<'graph> for ReversedGraph<'_, G> {
-  type Item = G::Node;
-  type Iter = smallvec::IntoIter<[Self::Item; 4]>;
-}
-
-impl<G: ControlFlowGraph> WithPredecessors for ReversedGraph<'_, G> {
-  fn predecessors(&self, node: Self::Node) -> <Self as GraphPredecessors<'_>>::Iter {
+impl<G: ControlFlowGraph> Predecessors for ReversedGraph<'_, G> {
+  fn predecessors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
     self
       .graph
       .successors(node)
@@ -77,15 +64,19 @@ impl<G: ControlFlowGraph> WithPredecessors for ReversedGraph<'_, G> {
 }
 
 /// Represents the post-dominators of a graph's nodes with respect to a particular exit.
-pub struct PostDominators<Node: Idx>(Dominators<Node>);
+pub struct PostDominators<Node: Idx> {
+  dominators: Dominators<Node>,
+  num_nodes: usize,
+}
 
 impl<Node: Idx> PostDominators<Node> {
   /// Constructs the post-dominators by computing the dominators on a reversed graph.
   pub fn build<G: ControlFlowGraph<Node = Node>>(graph: &G, exit: Node) -> Self {
+    let num_nodes = graph.num_nodes();
     let mut reversed = ReversedGraph {
       graph,
       exit,
-      unreachable: BitSet::new_empty(graph.num_nodes()),
+      unreachable: BitSet::new_empty(num_nodes),
     };
 
     let reachable = iterate::post_order_from(&reversed, exit);
@@ -95,18 +86,25 @@ impl<Node: Idx> PostDominators<Node> {
     }
 
     let dominators = dominators::dominators(&reversed);
-    PostDominators::<Node>(dominators)
+    PostDominators {
+      dominators,
+      num_nodes,
+    }
   }
 
   /// Gets the node that immediately post-dominators `node`, if one exists.
   pub fn immediate_post_dominator(&self, node: Node) -> Option<Node> {
-    self.0.immediate_dominator(node)
+    self.dominators.immediate_dominator(node)
   }
 
   /// Gets all nodes that post-dominate `node`, if they exist.
-  pub fn post_dominators(&self, node: Node) -> Option<DominatorsIter<'_, Node>> {
-    let reachable = self.0.is_reachable(node);
-    reachable.then(|| self.0.dominators(node))
+  pub fn post_dominators(&self, node: Node) -> Option<impl Iterator<Item = Node> + '_> {
+    let reachable = self.dominators.is_reachable(node);
+    reachable.then(move || {
+      (0 .. self.num_nodes)
+        .map(Node::new)
+        .filter(move |other| self.dominators.dominates(*other, node))
+    })
   }
 }
 
@@ -152,7 +150,8 @@ impl<Node: Idx + Ord> ControlDependencies<Node> {
         Some((idom(node)?, node))
       })
       .collect::<Vec<_>>();
-    let dominator_tree = VecGraph::new(n, edges);
+
+    let dominator_tree: VecGraph<Node, true> = VecGraph::new(n, edges);
 
     let traversal = iterate::post_order_from(&dominator_tree, exit);
 
@@ -195,7 +194,7 @@ impl<Node: Idx + Ord> ControlDependencies<Node> {
   }
 
   /// Returns the set of all node that are control-dependent on the given `node`.
-  pub fn dependent_on(&self, node: Node) -> Option<&HybridBitSet<Node>> {
+  pub fn dependent_on(&self, node: Node) -> Option<&BitSet<Node>> {
     self.0.row(node)
   }
 }
@@ -211,17 +210,15 @@ mod test {
 
   #[test]
   fn test_control_dependencies() {
-    let input = r#"
-    fn main() {
-      let mut x = 1;
-      x = 2;
-      if true { x = 3; }
-      for _ in 0 .. 1 { x = 4; }
-      x = 5;
-    }"#;
-    test_utils::CompileBuilder::new(input).expect_compile(|result| {
-      let tcx = result.tcx;
-      let (_, body_with_facts) = result.as_body();
+    let input = r"
+fn main() {
+  let mut x = 1;
+  x = 2;
+  if true { x = 3; }
+  for _ in 0 .. 1 { x = 4; }
+  x = 5;
+}";
+    test_utils::compile_body(input, move |tcx, _, body_with_facts| {
       let body = &body_with_facts.body;
       let control_deps = body.control_dependencies();
 

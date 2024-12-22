@@ -79,7 +79,7 @@ where
   /// # Panics
   ///
   /// If this is a recursive invocation for this key.
-  pub fn get(&self, key: In, compute: impl FnOnce(In) -> Out) -> &Out {
+  pub fn get(&self, key: &In, compute: impl FnOnce(In) -> Out) -> &Out {
     self
       .get_maybe_recursive(key, compute)
       .unwrap_or_else(recursion_panic)
@@ -95,7 +95,7 @@ where
   /// Returns `None` if this is a recursive invocation of `get` for key `key`.
   pub fn get_maybe_recursive<'a>(
     &'a self,
-    key: In,
+    key: &In,
     compute: impl FnOnce(In) -> Out,
   ) -> Option<&'a Out> {
     match self.try_retrieve(key, |in_| Some(compute(in_))) {
@@ -109,7 +109,7 @@ where
   /// recursive computation.
   pub fn try_retrieve<'a>(
     &'a self,
-    key: In,
+    key: &In,
     compute: impl FnOnce(In) -> Option<Out>,
   ) -> Retrieval<&'a Out> {
     if !self.0.borrow().contains_key(&key) {
@@ -186,7 +186,7 @@ where
   /// # Panics
   ///
   /// If this is a recursive invocation for this key.
-  pub fn get(&self, key: In, compute: impl FnOnce(In) -> Out) -> Out {
+  pub fn get(&self, key: &In, compute: impl FnOnce(In) -> Out) -> Out {
     self
       .get_maybe_recursive(key, compute)
       .unwrap_or_else(recursion_panic)
@@ -198,16 +198,16 @@ where
   /// Returns `None` if this is a recursive invocation of `get` for key `key`.
   pub fn get_maybe_recursive(
     &self,
-    key: In,
+    key: &In,
     compute: impl FnOnce(In) -> Out,
   ) -> Option<Out> {
-    if !self.0.borrow().contains_key(&key) {
+    if !self.0.borrow().contains_key(key) {
       self.0.borrow_mut().insert(key.clone(), None);
       let out = compute(key.clone());
       self.0.borrow_mut().insert(key.clone(), Some(out));
     }
 
-    *self.0.borrow_mut().get(&key).expect("invariant broken")
+    *self.0.borrow_mut().get(key).expect("invariant broken")
   }
 }
 
@@ -224,9 +224,9 @@ mod test {
   #[test]
   fn test_cached() {
     let cache: Cache<usize, usize> = Cache::default();
-    let x = cache.get(0, |_| 0);
-    let y = cache.get(1, |_| 1);
-    let z = cache.get(0, |_| 2);
+    let x = cache.get(&0, |_| 0);
+    let y = cache.get(&1, |_| 1);
+    let z = cache.get(&0, |_| 2);
     assert_eq!(*x, 0);
     assert_eq!(*y, 1);
     assert_eq!(*z, 0);
@@ -240,12 +240,12 @@ mod test {
       fn get_infinite_recursion(&self, i: i32) -> i32 {
         self
           .0
-          .get_maybe_recursive(i, |_| i + self.get_infinite_recursion(i))
+          .get_maybe_recursive(&i, |_| i + self.get_infinite_recursion(i))
           .copied()
           .unwrap_or(-18)
       }
       fn get_safe_recursion(&self, i: i32) -> i32 {
-        *self.0.get(i, |_| {
+        *self.0.get(&i, |_| {
           if i == 0 {
             0
           } else {
@@ -255,7 +255,7 @@ mod test {
       }
     }
 
-    let cache = RecursiveUse(Default::default());
+    let cache = RecursiveUse(Cache::default());
 
     assert_eq!(cache.get_infinite_recursion(60), 42);
     assert_eq!(cache.get_safe_recursion(5), 15);

@@ -87,11 +87,11 @@ impl SpanExt for Span {
     // of that span is the entire macro.
     if outer_span.contains(*self) {
       return Some(*self);
-    } else {
-      let sp = self.source_callsite();
-      if outer_span.contains(sp) {
-        return Some(sp);
-      }
+    }
+
+    let sp = self.source_callsite();
+    if outer_span.contains(sp) {
+      return Some(sp);
     }
 
     None
@@ -107,7 +107,7 @@ impl SpanExt for Span {
     spans.sort_by_key(|s| (s.lo(), s.hi()));
 
     // See note in Span::subtract
-    for span in spans.iter_mut() {
+    for span in &mut spans {
       *span = span.with_ctxt(SyntaxContext::root());
     }
 
@@ -154,10 +154,14 @@ impl SpanExt for Span {
       let offset = line
         .chars()
         .take_while(|c| c.is_whitespace())
-        .map(|c| c.len_utf8())
+        .map(char::len_utf8)
         .sum::<usize>();
-      let end = (start + BytePos(line.len() as u32)).min(self.hi());
-      spans.push(self.with_lo(start + BytePos(offset as u32)).with_hi(end));
+      let end = (start + BytePos(u32::try_from(line.len()).unwrap())).min(self.hi());
+      spans.push(
+        self
+          .with_lo(start + BytePos(u32::try_from(offset).unwrap()))
+          .with_hi(end),
+      );
       start = end + BytePos(1);
     }
     Some(spans)
@@ -184,7 +188,7 @@ mod test {
 
   #[test]
   fn test_span_subtract() {
-    rustc_span::create_default_session_if_not_set_then(|_| {
+    rustc_span::create_default_session_globals_then(|| {
       let mk = |lo, hi| Span::with_root_ctxt(BytePos(lo), BytePos(hi));
       let outer = mk(1, 10);
       let inner: Vec<Span> = vec![mk(0, 2), mk(3, 4), mk(3, 5), mk(7, 8), mk(9, 13)];

@@ -260,7 +260,7 @@ fn only_run_on_file(
     CompileKind::ProcMacro => {}
   }
 
-  cmd.env(SPECIFIC_CRATE, &pkg.name.replace('-', "_"));
+  cmd.env(SPECIFIC_CRATE, pkg.name.replace('-', "_"));
   cmd.env(SPECIFIC_TARGET, kind_str);
 
   log::debug!(

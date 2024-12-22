@@ -286,7 +286,7 @@ mod test {
         &["w.0"],
         &["w.0"],
       ];
-      for (input_span, desired) in spans.into_iter().zip(expected.into_iter()) {
+      for (input_span, desired) in spans.into_iter().zip(expected) {
         let outputs = spanner.span_to_places(input_span);
         let snippets = outputs
           .into_iter()
@@ -300,8 +300,8 @@ mod test {
   }
 
   fn compare_sets(desired: &HashSet<impl AsRef<str>>, actual: &HashSet<impl AsRef<str>>) {
-    let desired = desired.iter().map(|s| s.as_ref()).collect::<HashSet<_>>();
-    let actual = actual.iter().map(|s| s.as_ref()).collect::<HashSet<_>>();
+    let desired = desired.iter().map(AsRef::as_ref).collect::<HashSet<_>>();
+    let actual = actual.iter().map(AsRef::as_ref).collect::<HashSet<_>>();
     let missing_desired = &desired - &actual;
     let missing_actual = &actual - &desired;
 
@@ -317,7 +317,7 @@ mod test {
 
   #[test]
   fn test_location_to_spans() {
-    let src = r#"fn foo() {
+    let src = r"fn foo() {
   let mut x: i32 = 1;
   let y = x + 2;
   let w = if true {
@@ -331,7 +331,7 @@ mod test {
   let q = x
     .leading_ones()
     .trailing_zeros();
-}"#;
+}";
 
     // This affects source mapping, and this feature is primarily used by Flowistry, so
     // we enable MIR simplification for consistency with Flowistry.

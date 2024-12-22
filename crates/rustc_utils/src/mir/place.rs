@@ -1,6 +1,6 @@
 //! Utilities for [`Place`].
 
-use std::{borrow::Cow, collections::VecDeque, ops::ControlFlow};
+use std::{borrow::Cow, collections::VecDeque};
 
 use log::{trace, warn};
 use rustc_data_structures::fx::{FxHashMap as HashMap, FxHashSet as HashSet};
@@ -9,20 +9,17 @@ use rustc_infer::infer::TyCtxtInferExt;
 use rustc_middle::{
   mir::{
     visit::{PlaceContext, Visitor},
-    Body, HasLocalDecls, Local, Location, MirPass, Mutability, Place, PlaceElem,
-    PlaceRef, ProjectionElem, StatementKind, TerminatorKind, VarDebugInfo,
-    VarDebugInfoContents, RETURN_PLACE,
+    Body, HasLocalDecls, Local, Location, Mutability, Place, PlaceElem, PlaceRef,
+    ProjectionElem, VarDebugInfo, VarDebugInfoContents, RETURN_PLACE,
   },
   traits::ObligationCause,
-  ty::{
-    self, AdtKind, Region, RegionKind, RegionVid, Ty, TyCtxt, TyKind, TypeAndMut,
-    TypeVisitor,
-  },
+  ty::{self, AdtKind, Region, RegionKind, RegionVid, Ty, TyCtxt, TyKind, TypeVisitor},
 };
 use rustc_target::abi::{FieldIdx, VariantIdx};
 use rustc_trait_selection::traits::NormalizeExt;
+use rustc_type_ir::TypingMode;
 
-use crate::{AdtDefExt, BodyExt, SpanExt};
+use crate::{AdtDefExt, SpanExt};
 
 /// A MIR [`Visitor`] which collects all [`Place`]s that appear in the visited object.
 #[derive(Default)]
@@ -36,48 +33,6 @@ impl<'tcx> Visitor<'tcx> for PlaceCollector<'tcx> {
     _location: Location,
   ) {
     self.0.push(*place);
-  }
-}
-
-/// MIR pass to remove instructions not important for Flowistry.
-///
-/// This pass helps reduce the number of intermediates during dataflow analysis, which
-/// reduces memory usage.
-pub struct SimplifyMir;
-impl<'tcx> MirPass<'tcx> for SimplifyMir {
-  fn run_pass(&self, _tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
-    let return_blocks = body
-      .all_returns()
-      .filter_map(|loc| {
-        let bb = &body.basic_blocks[loc.block];
-        bb.statements.is_empty().then_some(loc.block)
-      })
-      .collect::<HashSet<_>>();
-
-    for block in body.basic_blocks_mut() {
-      block.statements.retain(|stmt| {
-        !matches!(
-          stmt.kind,
-          StatementKind::StorageLive(..) | StatementKind::StorageDead(..)
-        )
-      });
-
-      let terminator = block.terminator_mut();
-      terminator.kind = match terminator.kind {
-        TerminatorKind::FalseEdge { real_target, .. } => TerminatorKind::Goto {
-          target: real_target,
-        },
-        TerminatorKind::FalseUnwind { real_target, .. } => TerminatorKind::Goto {
-          target: real_target,
-        },
-        // Ensures that control dependencies can determine the independence of differnet
-        // return paths
-        TerminatorKind::Goto { target } if return_blocks.contains(&target) => {
-          TerminatorKind::Return
-        }
-        _ => continue,
-      }
-    }
   }
 }
 
@@ -103,19 +58,13 @@ pub trait PlaceExt<'tcx> {
   /// - all dereferences in `self` are dereferences of a `Box`
   fn is_direct(&self, body: &Body<'tcx>, tcx: TyCtxt<'tcx>) -> bool;
 
-  type RefsInProjectionIter<'a>: Iterator<
-    Item = (PlaceRef<'tcx>, &'tcx [PlaceElem<'tcx>]),
-  >
-  where
-    Self: 'a;
-
   /// Returns an iterator over all prefixes of `self`'s projection that are references,
   ///  along with the suffix of the remaining projection.
   fn refs_in_projection(
-    &self,
+    self,
     body: &Body<'tcx>,
     tcx: TyCtxt<'tcx>,
-  ) -> Self::RefsInProjectionIter<'_>;
+  ) -> impl Iterator<Item = (PlaceRef<'tcx>, &'tcx [PlaceElem<'tcx>])>;
 
   /// Returns all possible projections of `self` that are references.
   ///
@@ -187,12 +136,11 @@ impl<'tcx> PlaceExt<'tcx> for Place<'tcx> {
       || self.refs_in_projection(body, tcx).next().is_none()
   }
 
-  type RefsInProjectionIter<'a> = impl Iterator<Item = (PlaceRef<'tcx>, &'tcx [PlaceElem<'tcx>])> + 'a where Self: 'a;
   fn refs_in_projection(
-    &self,
+    self,
     body: &Body<'tcx>,
     tcx: TyCtxt<'tcx>,
-  ) -> Self::RefsInProjectionIter<'_> {
+  ) -> impl Iterator<Item = (PlaceRef<'tcx>, &'tcx [PlaceElem<'tcx>])> {
     self
       .projection
       .iter()
@@ -205,7 +153,7 @@ impl<'tcx> PlaceExt<'tcx> for Place<'tcx> {
           Some((i, elem, old_ty))
         },
       )
-      .filter_map(|(i, elem, ty)| match elem {
+      .filter_map(move |(i, elem, ty)| match elem {
         ProjectionElem::Deref => {
           let ptr = PlaceRef {
             local: self.local,
@@ -392,7 +340,10 @@ impl<'tcx> PlaceExt<'tcx> for Place<'tcx> {
   fn normalize(&self, tcx: TyCtxt<'tcx>, def_id: DefId) -> Place<'tcx> {
     let param_env = tcx.param_env(def_id);
     let place = tcx.erase_regions(*self);
-    let infcx = tcx.infer_ctxt().build();
+    let infcx = tcx.infer_ctxt().build(TypingMode::post_borrowck_analysis(
+      tcx,
+      def_id.expect_local(),
+    ));
     let place = infcx
       .at(&ObligationCause::dummy(), param_env)
       .normalize(place)
@@ -416,19 +367,18 @@ impl<'tcx> PlaceExt<'tcx> for Place<'tcx> {
     Place::make(place.local, &projection, tcx)
   }
 
-  fn is_source_visible(&self, tcx: TyCtxt, body: &Body) -> bool {
+  fn is_source_visible(&self, _tcx: TyCtxt, body: &Body) -> bool {
     let local = self.local;
     let local_info = &body.local_decls[local];
     let is_loc = local_info.is_user_variable();
     let from_desugaring = local_info.from_compiler_desugaring();
-    let source_info = local_info.source_info;
+    let from_expansion = local_info.source_info.span.from_expansion();
 
-    // The assumption is that decls whose source_scope should be collapsed
-    // (i.e. with that of the outermost expansion site) are coming from a
-    // HIR -> MIR expansion OR are being expanded from some macro not
-    // actually visible in the source scope.
-    let should_collapse = tcx.should_collapse_debuginfo(source_info.span);
-    is_loc && !should_collapse && !from_desugaring
+    // The assumption is that for a place to be source visible it needs to:
+    // 1. Be a local declaration.
+    // 2. Not be from a compiler desugaring.
+    // 3. Not be from a macro expansion (basically also a desugaring).
+    is_loc && !from_desugaring && !from_expansion
   }
 }
 
@@ -528,10 +478,10 @@ pub const UNKNOWN_REGION: RegionVid = RegionVid::MAX;
 impl<'tcx, Dispatcher: RegionVisitorDispatcher<'tcx>> TypeVisitor<TyCtxt<'tcx>>
   for RegionVisitor<'tcx, Dispatcher>
 {
-  fn visit_ty(&mut self, ty: Ty<'tcx>) -> ControlFlow<Self::BreakTy> {
+  fn visit_ty(&mut self, ty: Ty<'tcx>) {
     let tcx = self.tcx;
     if self.ty_stack.iter().any(|visited_ty| ty == *visited_ty) {
-      return ControlFlow::Continue(());
+      return;
     }
 
     trace!(
@@ -544,7 +494,7 @@ impl<'tcx, Dispatcher: RegionVisitorDispatcher<'tcx>> TypeVisitor<TyCtxt<'tcx>>
     match ty.kind() {
       _ if ty.is_box() => {
         self.place_stack.push(ProjectionElem::Deref);
-        self.visit_ty(ty.boxed_ty());
+        self.visit_ty(ty.boxed_ty().expect("Cannot unbox boxed type??"));
         self.place_stack.pop();
       }
 
@@ -613,11 +563,11 @@ impl<'tcx, Dispatcher: RegionVisitorDispatcher<'tcx>> TypeVisitor<TyCtxt<'tcx>>
         StoppingCondition::BeforeRefs => {}
       },
 
-      TyKind::Closure(_, substs) | TyKind::Generator(_, substs, _) => {
+      TyKind::Closure(_, substs) | TyKind::Coroutine(_, substs) => {
         self.visit_ty(substs.as_closure().tupled_upvars_ty());
       }
 
-      TyKind::RawPtr(TypeAndMut { ty, .. }) => {
+      TyKind::RawPtr(ty, _) => {
         self.visit_region(Region::new_var(tcx, UNKNOWN_REGION));
         self.place_stack.push(ProjectionElem::Deref);
         self.visit_ty(*ty);
@@ -672,16 +622,15 @@ impl<'tcx, Dispatcher: RegionVisitorDispatcher<'tcx>> TypeVisitor<TyCtxt<'tcx>>
     self.dispatcher.on_visit_type(ty);
 
     self.ty_stack.pop();
-    ControlFlow::Continue(())
   }
 
-  fn visit_region(&mut self, region: ty::Region<'tcx>) -> ControlFlow<Self::BreakTy> {
+  fn visit_region(&mut self, region: ty::Region<'tcx>) -> Self::Result {
     trace!("visiting region {region:?}");
     let region = match region.kind() {
       RegionKind::ReVar(region) => region,
       RegionKind::ReStatic => RegionVid::from_usize(0),
-      RegionKind::ReErased | RegionKind::ReLateBound(_, _) => {
-        return ControlFlow::Continue(());
+      RegionKind::ReErased | RegionKind::ReLateParam(_) => {
+        return;
       }
       _ => unreachable!("{:?}: {:?}", self.ty_stack.first().unwrap(), region),
     };
@@ -709,8 +658,6 @@ impl<'tcx, Dispatcher: RegionVisitorDispatcher<'tcx>> TypeVisitor<TyCtxt<'tcx>>
     self
       .dispatcher
       .on_visit_place(self.tcx.mk_place_deref(place));
-
-    ControlFlow::Continue(())
   }
 }
 
@@ -723,12 +670,15 @@ mod test {
     ty::TyCtxt,
   };
 
-  use super::{BodyExt, PlaceExt};
-  use crate::test_utils::{self, compare_sets, CompileResult, Placer};
+  use super::PlaceExt;
+  use crate::{
+    mir::body::BodyExt,
+    test_utils::{self, compare_sets, CompileResult, Placer},
+  };
 
   #[test]
   fn test_place_arg_direct() {
-    let input = r#"
+    let input = r"
 fn foobar(x: &i32) {
   let y = 1;
   let z = &y;
@@ -736,10 +686,8 @@ fn foobar(x: &i32) {
   let ref_k = &k;
   let box_ref = Box::new(x);
 }
-"#;
-    test_utils::CompileBuilder::new(input).expect_compile(|result| {
-      let tcx = result.tcx;
-      let (_, body_with_facts) = result.as_body();
+";
+    test_utils::compile_body(input, |tcx, _, body_with_facts| {
       let body = &body_with_facts.body;
       let name_map = body.debug_info_name_map();
       let x = Place::from_local(name_map["x"], tcx);
@@ -787,19 +735,16 @@ fn foobar(x: &i32) {
 
   #[test]
   fn test_place_to_string() {
-    let input = r#"
+    let input = r"
 struct Point { x: usize, y: usize }
 fn main() {
   let x = (0, 0);
   let y = Some(1);
-  let z = &[Some((0, 1))];    
+  let z = &[Some((0, 1))];
   let w = (&y,);
   let p = &Point { x: 0, y: 0 };
-}
-    "#;
-    test_utils::CompileBuilder::new(input).expect_compile(|result| {
-      let tcx = result.tcx;
-      let (_, body_with_facts) = result.as_body();
+}";
+    test_utils::compile_body(input, |tcx, _, body_with_facts| {
       let body = &body_with_facts.body;
       let p = Placer::new(tcx, body);
 
@@ -836,15 +781,17 @@ fn main() {
 
   #[test]
   fn test_place_visitors() {
-    let input = r#"
+    let input = r"
 fn main() {
   let x = 0;
   let y = (0, &x);
 }
-    "#;
-    fn callback<'tcx>(result: CompileResult<'tcx>) {
-      let tcx = result.tcx;
-      let (body_id, body_with_facts) = result.as_body();
+";
+    fn callback<'tcx>(
+      tcx: TyCtxt<'tcx>,
+      body_id: BodyId,
+      body_with_facts: &BodyWithBorrowckFacts<'tcx>,
+    ) {
       let body = &body_with_facts.body;
       let def_id = tcx.hir().body_owner_def_id(body_id).to_def_id();
       let p = Placer::new(tcx, body);
@@ -865,6 +812,6 @@ fn main() {
         [y1],
       );
     }
-    test_utils::CompileBuilder::new(input).expect_compile(callback);
+    test_utils::compile_body(input, callback);
   }
 }
