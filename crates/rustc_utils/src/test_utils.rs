@@ -11,6 +11,7 @@ use rustc_data_structures::{
   fx::{FxHashMap as HashMap, FxHashSet as HashSet},
   sync::Lrc,
 };
+use rustc_errors::FatalError;
 use rustc_hir::{BodyId, ItemKind};
 use rustc_interface::interface;
 use rustc_middle::{
@@ -96,7 +97,7 @@ impl CompileBuilder {
   pub fn compile(
     &self,
     f: impl for<'tcx> FnOnce(CompileResult<'tcx>) + Send,
-  ) -> interface::Result<()> {
+  ) -> Result<(), FatalError> {
     let temp_dir = std::env::temp_dir();
     let random = rand::random::<u64>() / 0x100_000_000_u64;
     let crate_name = format!("crate{random:x}");
@@ -131,8 +132,6 @@ impl CompileBuilder {
       compiler.set_file_loader(Some(Box::new(StringLoader(self.input.clone()))));
       compiler.run()
     })
-    .unwrap();
-    Ok(())
   }
 
   pub fn expect_compile(&self, f: impl for<'tcx> FnOnce(CompileResult<'tcx>) + Send) {
