@@ -109,6 +109,7 @@ impl CompileBuilder {
       "-Zidentify-regions",
       "-Zmir-opt-level=0",
       "-Zmaximal-hir-to-mir-coverage",
+      "-Ztrack-diagnostics",
       "--allow",
       "warnings",
       "--sysroot",
@@ -197,10 +198,10 @@ impl<Cb> rustc_driver::Callbacks for TestCallbacks<Cb>
 where
   Cb: FnOnce(TyCtxt<'_>),
 {
-  fn after_analysis(
+  fn after_expansion<'tcx>(
     &mut self,
-    _compiler: &rustc_interface::interface::Compiler,
-    tcx: TyCtxt<'_>,
+    _compiler: &interface::Compiler,
+    tcx: TyCtxt<'tcx>,
   ) -> rustc_driver::Compilation {
     let callback = self.callback.take().unwrap();
     callback(tcx);
