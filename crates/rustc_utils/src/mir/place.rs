@@ -340,10 +340,9 @@ impl<'tcx> PlaceExt<'tcx> for Place<'tcx> {
   fn normalize(&self, tcx: TyCtxt<'tcx>, def_id: DefId) -> Place<'tcx> {
     let param_env = tcx.param_env(def_id);
     let place = tcx.erase_regions(*self);
-    let infcx = tcx.infer_ctxt().build(TypingMode::post_borrowck_analysis(
-      tcx,
-      def_id.expect_local(),
-    ));
+    //let typing_mode = TypingMode::post_borrowck_analysis(tcx, def_id.expect_local());
+    let typing_mode = TypingMode::PostAnalysis;
+    let infcx = tcx.infer_ctxt().build(typing_mode);
     let place = infcx
       .at(&ObligationCause::dummy(), param_env)
       .normalize(place)
