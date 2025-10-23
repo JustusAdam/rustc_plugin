@@ -141,6 +141,12 @@ where
   pub(crate) unsafe fn clear(&self) {
     self.0.borrow_mut().clear()
   }
+
+  pub fn get_if_present<'a>(&self, key: &In) -> Option<&'a Out> {
+    self.0.borrow().get(key).and_then(|v| {
+      Some(unsafe { std::mem::transmute::<&'_ Out, &'a Out>(&*(v.as_ref()?)) })
+    })
+  }
 }
 
 pub enum Retrieval<T> {
